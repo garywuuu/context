@@ -89,7 +89,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// GET /api/decisions - List decisions (with optional filters)
+// GET /api/decisions - List decisions (with optional filters, search, pagination)
 export async function GET(request: NextRequest) {
   try {
     // Authenticate request
@@ -98,26 +98,43 @@ export async function GET(request: NextRequest) {
 
     const { searchParams } = new URL(request.url);
     const agent_id = searchParams.get('agent_id');
-    const limit = parseInt(searchParams.get('limit') || '50');
+    const query_text = searchParams.get('query');
+    const limit = parseInt(searchParams.get('limit') || '20');
     const offset = parseInt(searchParams.get('offset') || '0');
 
-    let query = supabaseAdmin
+    // Count query (same filters, no pagination)
+    let countQuery = supabaseAdmin
+      .from('decisions')
+      .select('*', { count: 'exact', head: true });
+
+    // Data query
+    let dataQuery = supabaseAdmin
       .from('decisions')
       .select('*')
       .order('timestamp', { ascending: false })
       .range(offset, offset + limit - 1);
 
     if (agent_id) {
-      query = query.eq('agent_id', agent_id);
+      countQuery = countQuery.eq('agent_id', agent_id);
+      dataQuery = dataQuery.eq('agent_id', agent_id);
     }
 
-    const { data, error } = await query;
-
-    if (error) {
-      return NextResponse.json({ error: error.message }, { status: 500 });
+    if (query_text) {
+      const filter = `action_taken.ilike.%${query_text}%,reasoning.ilike.%${query_text}%`;
+      countQuery = countQuery.or(filter);
+      dataQuery = dataQuery.or(filter);
     }
 
-    return NextResponse.json(data);
+    const [{ count, error: countError }, { data, error }] = await Promise.all([
+      countQuery,
+      dataQuery,
+    ]);
+
+    if (error || countError) {
+      return NextResponse.json({ error: (error || countError)!.message }, { status: 500 });
+    }
+
+    return NextResponse.json({ decisions: data || [], total: count || 0 });
   } catch (error) {
     if (error instanceof AuthenticationError) {
       return NextResponse.json({ error: error.message }, { status: error.statusCode });

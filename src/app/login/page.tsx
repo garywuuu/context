@@ -44,7 +44,7 @@ export default function LoginPage() {
         } else if (data.user && !data.session) {
           setMessage('Check your email for a confirmation link.');
         } else if (data.session) {
-          router.push('/');
+          router.push('/spec');
           router.refresh();
         }
       } else {
@@ -56,7 +56,7 @@ export default function LoginPage() {
         if (error) throw error;
 
         if (data.user) {
-          router.push('/');
+          router.push('/spec');
           router.refresh();
         }
       }

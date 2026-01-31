@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import { supabaseAdmin } from '@/lib/supabase';
 import { verifySlackSignature } from '@/lib/slack';
 import { processMessages } from '@/lib/extraction';
+import { sendDecisionConfirmationDM } from '@/lib/slack/decision-dm';
+import { parseGCLink, buildDecisionUnfurl } from '@/lib/slack/unfurl';
+import { publishAppHome } from '@/lib/slack/app-home';
 import { v4 as uuidv4 } from 'uuid';
 
 /**
@@ -47,20 +50,44 @@ export async function POST(request: NextRequest) {
   }
 
   // Fire-and-forget: process the event asynchronously
-  void handleEvent(event, teamId).catch((err) => {
+  void processEventAsync(event, teamId).catch((err) => {
     console.error('Error processing Slack event:', err);
   });
 
   return NextResponse.json({ ok: true });
 }
 
-async function handleEvent(
+/**
+ * Route events to the appropriate handler.
+ */
+async function processEventAsync(
   event: Record<string, unknown>,
   teamId: string
 ): Promise<void> {
-  // Only handle message events
-  if (event.type !== 'message') return;
+  const eventType = event.type as string;
 
+  switch (eventType) {
+    case 'message':
+      await handleMessageEvent(event, teamId);
+      break;
+    case 'link_shared':
+      await handleLinkShared(event, teamId);
+      break;
+    case 'app_home_opened':
+      await handleAppHomeOpened(event, teamId);
+      break;
+    default:
+      // Ignore unhandled event types
+      break;
+  }
+}
+
+// ---------- Message event handler (existing logic + DM sending) ----------
+
+async function handleMessageEvent(
+  event: Record<string, unknown>,
+  teamId: string
+): Promise<void> {
   // Skip bot messages, message_changed, message_deleted, etc.
   if (event.subtype) return;
 
@@ -101,19 +128,12 @@ async function handleEvent(
   if (!slackChannel) return; // Channel not monitored
 
   // Resolve user name
+  const botToken = (integration.credentials as Record<string, string>)?.bot_token;
   let userName: string | undefined;
   try {
     const { WebClient } = await import('@slack/web-api');
-    const creds = (
-      await supabaseAdmin
-        .from('integrations')
-        .select('credentials')
-        .eq('id', integrationId)
-        .single()
-    ).data?.credentials as Record<string, string>;
-
-    if (creds?.bot_token) {
-      const client = new WebClient(creds.bot_token);
+    if (botToken) {
+      const client = new WebClient(botToken);
       const userInfo = await client.users.info({ user: userId });
       userName =
         userInfo.user?.real_name ||
@@ -191,6 +211,9 @@ async function handleEvent(
             channelName,
             threadTs
           );
+
+          // After extraction, check if a pending decision was created and send DM
+          await maybeSendDecisionDM(organizationId, channelName, threadTs, userId, botToken, channelId);
         }
       }
     }
@@ -207,5 +230,189 @@ async function handleEvent(
       ],
       channelName
     );
+
+    // After extraction, check if a pending decision was created and send DM
+    await maybeSendDecisionDM(organizationId, channelName, undefined, userId, botToken, channelId, messageTs);
+  }
+}
+
+/**
+ * After processMessages runs, check if a new pending decision was created.
+ * If so, DM the message author with confirmation buttons.
+ */
+async function maybeSendDecisionDM(
+  organizationId: string,
+  channelName: string,
+  threadTs: string | undefined,
+  slackUserId: string,
+  botToken: string | undefined,
+  channelId: string,
+  messageTs?: string
+): Promise<void> {
+  if (!botToken) return;
+
+  // Find the most recently created pending decision for this channel/thread
+  let query = supabaseAdmin
+    .from('extracted_decisions')
+    .select('*')
+    .eq('organization_id', organizationId)
+    .eq('source_channel', channelName)
+    .eq('status', 'pending')
+    .order('extracted_at', { ascending: false })
+    .limit(1);
+
+  if (threadTs) {
+    query = query.eq('source_thread_ts', threadTs);
+  }
+
+  const { data: decisions } = await query;
+  const decision = decisions?.[0];
+  if (!decision) return;
+
+  // Only DM for pending decisions (confidence 0.60-0.84 range — high-confidence ones
+  // would have been auto-promoted if that logic existed, but currently all are "pending")
+  if (decision.status !== 'pending') return;
+
+  // Build source URL for "View in Slack"
+  // Slack deep link format: https://slack.com/archives/{channel}/{message_ts}
+  const sourceTs = threadTs || messageTs || '';
+  const sourceUrl = sourceTs
+    ? `https://slack.com/archives/${channelId}/p${sourceTs.replace('.', '')}`
+    : undefined;
+
+  const rawExtraction = (decision.raw_extraction as Record<string, unknown>) || {};
+
+  const dmResult = await sendDecisionConfirmationDM({
+    botToken,
+    slackUserId,
+    traceId: decision.id,
+    title: decision.title,
+    rationale: decision.rationale || '',
+    area: (rawExtraction.area as string) || undefined,
+    confidence: decision.confidence,
+    sourceUrl,
+    channelName,
+  });
+
+  if (dmResult.ok && dmResult.channelId && dmResult.messageTs) {
+    // Store DM reference in raw_extraction for later message updates
+    await supabaseAdmin
+      .from('extracted_decisions')
+      .update({
+        raw_extraction: {
+          ...rawExtraction,
+          dm_channel_id: dmResult.channelId,
+          dm_message_ts: dmResult.messageTs,
+        },
+      })
+      .eq('id', decision.id);
+  }
+}
+
+// ---------- Link shared handler ----------
+
+async function handleLinkShared(
+  event: Record<string, unknown>,
+  teamId: string
+): Promise<void> {
+  const links = event.links as Array<{ url: string; domain: string }> | undefined;
+  if (!links || links.length === 0) return;
+
+  const messageTs = event.message_ts as string;
+  const channel = event.channel as string;
+
+  // Look up integration
+  const { data: integrations } = await supabaseAdmin
+    .from('integrations')
+    .select('organization_id, credentials')
+    .eq('provider', 'slack')
+    .eq('status', 'active');
+
+  const integration = integrations?.find((i) => {
+    const creds = i.credentials as Record<string, string> | undefined;
+    return creds?.team_id === teamId;
+  });
+
+  if (!integration) return;
+
+  const creds = integration.credentials as Record<string, string>;
+  const botToken = creds.bot_token;
+  if (!botToken) return;
+
+  const { WebClient } = await import('@slack/web-api');
+  const client = new WebClient(botToken);
+  const organizationId = integration.organization_id;
+
+  // Build unfurls map
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const unfurls: Record<string, any> = {};
+
+  for (const link of links) {
+    const parsed = parseGCLink(link.url);
+    if (!parsed) continue;
+
+    if (parsed.type === 'decision') {
+      const { data: decision } = await supabaseAdmin
+        .from('extracted_decisions')
+        .select('title, rationale, status, confidence, participants, source_channel, extracted_at')
+        .eq('id', parsed.id)
+        .eq('organization_id', organizationId)
+        .single();
+
+      if (decision) {
+        unfurls[link.url] = buildDecisionUnfurl(decision);
+      }
+    }
+  }
+
+  if (Object.keys(unfurls).length > 0) {
+    try {
+      await client.chat.unfurl({
+        channel,
+        ts: messageTs,
+        unfurls,
+      });
+    } catch (err) {
+      // Silently fail if scope missing (links:write not granted)
+      console.error('Failed to unfurl links:', err);
+    }
+  }
+}
+
+// ---------- App Home opened handler ----------
+
+async function handleAppHomeOpened(
+  event: Record<string, unknown>,
+  teamId: string
+): Promise<void> {
+  const slackUserId = event.user as string;
+  if (!slackUserId) return;
+
+  // Only rebuild on the "home" tab
+  const tab = event.tab as string | undefined;
+  if (tab && tab !== 'home') return;
+
+  // Look up integration
+  const { data: integrations } = await supabaseAdmin
+    .from('integrations')
+    .select('organization_id, credentials')
+    .eq('provider', 'slack')
+    .eq('status', 'active');
+
+  const integration = integrations?.find((i) => {
+    const creds = i.credentials as Record<string, string> | undefined;
+    return creds?.team_id === teamId;
+  });
+
+  if (!integration) return;
+
+  const creds = integration.credentials as Record<string, string>;
+  const botToken = creds.bot_token;
+  if (!botToken) return;
+
+  try {
+    await publishAppHome(botToken, slackUserId, integration.organization_id);
+  } catch (err) {
+    console.error('Failed to publish App Home:', err);
   }
 }

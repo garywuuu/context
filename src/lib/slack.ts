@@ -46,6 +46,9 @@ export function getSlackOAuthURL(state: string): string {
     'users:read',
     'chat:write',
     'commands',
+    'im:write',
+    'links:read',
+    'links:write',
   ];
   return `https://slack.com/oauth/v2/authorize?client_id=${process.env.SLACK_CLIENT_ID}&scope=${scopes.join(',')}&state=${state}&redirect_uri=${process.env.NEXT_PUBLIC_APP_URL}/api/slack/oauth/callback`;
 }
