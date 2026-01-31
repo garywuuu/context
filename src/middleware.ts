@@ -43,7 +43,6 @@ export async function middleware(request: NextRequest) {
 
   // Protect dashboard routes
   if (!user && !isPublicRoute) {
-    // Redirect to login if not authenticated
     const url = request.nextUrl.clone();
     url.pathname = '/login';
     return NextResponse.redirect(url);
@@ -52,8 +51,37 @@ export async function middleware(request: NextRequest) {
   // Redirect to dashboard if already logged in and trying to access login
   if (user && request.nextUrl.pathname.startsWith('/login')) {
     const url = request.nextUrl.clone();
-    url.pathname = '/dashboard';
+    url.pathname = '/spec';
     return NextResponse.redirect(url);
+  }
+
+  // Redirect new users to onboarding if no LLM configured
+  // (skip if already on /onboarding)
+  if (user && !request.nextUrl.pathname.startsWith('/onboarding')) {
+    try {
+      const { data: userData } = await supabase
+        .from('users')
+        .select('organization_id')
+        .eq('id', user.id)
+        .single();
+
+      if (userData) {
+        const { data: org } = await supabase
+          .from('organizations')
+          .select('llm_config')
+          .eq('id', userData.organization_id)
+          .single();
+
+        const llmConfig = org?.llm_config as Record<string, string> | null;
+        if (!llmConfig || !llmConfig.api_key) {
+          const url = request.nextUrl.clone();
+          url.pathname = '/onboarding';
+          return NextResponse.redirect(url);
+        }
+      }
+    } catch {
+      // If org check fails, don't block — let them through
+    }
   }
 
   return response;

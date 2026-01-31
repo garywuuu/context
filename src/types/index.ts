@@ -178,6 +178,17 @@ export interface Override {
 }
 
 // ============================================
+// DECISION WITH FULL CONTEXT
+// ============================================
+
+export interface DecisionWithContext extends Decision {
+  contexts: Context[];
+  overrides: Override[];
+  capability_links?: DecisionCapabilityLink[];
+  goal_links?: DecisionGoalLink[];
+}
+
+// ============================================
 // API REQUEST TYPES
 // ============================================
 
@@ -245,3 +256,6 @@ export interface PatternDiscoveryResult {
   analyzed_decisions: number;
   discovery_timestamp: string;
 }
+
+// V1 types
+export * from './v1';
