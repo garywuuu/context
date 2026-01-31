@@ -5,6 +5,7 @@ import SourceCard from './SourceCard';
 export interface ChatMessageSource {
   decision_id: string;
   action_taken: string;
+  participants?: string[];
   similarity: number;
   timestamp: string;
   source_url?: string;
@@ -44,6 +45,7 @@ export default function ChatMessage({ role, content, sources }: ChatMessageProps
                   key={source.decision_id}
                   decision_id={source.decision_id}
                   action_taken={source.action_taken}
+                  participants={source.participants}
                   similarity={source.similarity}
                   timestamp={source.timestamp}
                   source_url={source.source_url}

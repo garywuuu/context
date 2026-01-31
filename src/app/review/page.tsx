@@ -196,12 +196,13 @@ export default function ReviewPage() {
     }
   };
 
-  // Bulk confirm all pending
-  const handleConfirmAll = async () => {
+  // Bulk action helper
+  const handleBulkAction = async (action: 'confirm' | 'dismiss') => {
     if (pendingCount === 0) return;
 
+    const label = action === 'confirm' ? 'approve' : 'dismiss';
     const confirmed = window.confirm(
-      `Are you sure you want to confirm all ${pendingCount} pending decision${pendingCount !== 1 ? 's' : ''}? This will create decision records for each one.`
+      `Are you sure you want to ${label} all ${pendingCount} pending decision${pendingCount !== 1 ? 's' : ''}?${action === 'confirm' ? ' This will create decision records for each one.' : ''}`
     );
     if (!confirmed) return;
 
@@ -209,7 +210,6 @@ export default function ReviewPage() {
     setError(null);
 
     try {
-      // First fetch all pending IDs
       const fetchRes = await fetch(
         `/api/review?status=pending&limit=1000&offset=0`
       );
@@ -224,30 +224,26 @@ export default function ReviewPage() {
       const res = await fetch('/api/review/bulk', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'confirm', ids: pendingIds }),
+        body: JSON.stringify({ action, ids: pendingIds }),
       });
 
       if (!res.ok) {
         const data = await res.json();
-        throw new Error(data.error || 'Failed to bulk confirm');
+        throw new Error(data.error || `Failed to bulk ${label}`);
       }
 
-      const data = await res.json();
-
-      // Refresh the list
       await fetchItems();
       await fetchPendingCount();
-
-      if (data.processed > 0) {
-        // Success handled by list refresh
-      }
     } catch (err) {
-      console.error('Error bulk confirming:', err);
-      setError(err instanceof Error ? err.message : 'Failed to bulk confirm');
+      console.error(`Error bulk ${label}:`, err);
+      setError(err instanceof Error ? err.message : `Failed to bulk ${label}`);
     } finally {
       setBulkLoading(false);
     }
   };
+
+  const handleConfirmAll = () => handleBulkAction('confirm');
+  const handleDismissAll = () => handleBulkAction('dismiss');
 
   const hasMore = items.length < total;
 
@@ -258,17 +254,6 @@ export default function ReviewPage() {
           <PageHeader
             title="Review"
             description={`${pendingCount} pending decision${pendingCount !== 1 ? 's' : ''}`}
-            actions={
-              <Button
-                variant="primary"
-                size="sm"
-                onClick={handleConfirmAll}
-                loading={bulkLoading}
-                disabled={pendingCount === 0}
-              >
-                Confirm All Pending
-              </Button>
-            }
           />
 
           {/* Status filter tabs */}
@@ -290,6 +275,28 @@ export default function ReviewPage() {
               </button>
             ))}
           </div>
+
+          {/* Bulk actions */}
+          {pendingCount > 0 && statusFilter !== 'confirmed' && statusFilter !== 'dismissed' && (
+            <div className="flex items-center gap-2 mb-4">
+              <Button
+                variant="primary"
+                size="xs"
+                onClick={handleConfirmAll}
+                loading={bulkLoading}
+              >
+                Approve All ({pendingCount})
+              </Button>
+              <Button
+                variant="ghost"
+                size="xs"
+                onClick={handleDismissAll}
+                disabled={bulkLoading}
+              >
+                Dismiss All
+              </Button>
+            </div>
+          )}
 
           {/* Error display */}
           {error && (

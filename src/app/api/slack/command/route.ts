@@ -91,7 +91,10 @@ async function processQuestionAsync(
     const sourcesText = result.sources.length > 0
       ? result.sources
           .slice(0, 3)
-          .map((s, i) => `${i + 1}. ${s.action_taken} (${Math.round(s.similarity * 100)}% match)`)
+          .map((s, i) => {
+            const who = s.participants?.length ? ` — ${s.participants.slice(0, 2).join(', ')}` : '';
+            return `${i + 1}. ${s.action_taken}${who}`;
+          })
           .join(' | ')
       : 'No sources found';
 
